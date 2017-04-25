@@ -33,17 +33,7 @@ type Status struct {
 	PlayersMax int
 }
 
-// Fetch tries to ping an MCPE server.
-func Fetch(host string) (*Status, error) {
-	conn, err := net.Dial("udp", host)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
-
-	uc := conn.(*net.UDPConn)
-	// generate and send the ping packet
+func generatePingPacket() []byte {
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 	r1 := rnd.Int63()
 	r2 := rnd.Int63()
@@ -53,14 +43,44 @@ func Fetch(host string) (*Status, error) {
 	binary.Write(&unconnectedPingPacket, binary.BigEndian, r1)
 	unconnectedPingPacket.Write(rakNetMagic)
 	binary.Write(&unconnectedPingPacket, binary.BigEndian, r2)
-	packetBytes := unconnectedPingPacket.Bytes()
+	return unconnectedPingPacket.Bytes()
+}
 
-	if _, err := uc.Write(packetBytes); err != nil {
+// Fetch tries to ping an MCPE server.
+func Fetch(host string) (*Status, error) {
+	conn, err := net.Dial("udp", host)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// send first ping packet
+	if _, err := conn.Write(generatePingPacket()); err != nil {
 		return nil, err
 	}
 
+	ticker := time.NewTicker(100 * time.Millisecond)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-ticker.C:
+			// resend ping packet
+			conn.Write(generatePingPacket())
+		case <-stop:
+			return
+		}
+	}()
+
+	// read from the server
 	buf := make([]byte, 2048)
-	read, err := uc.Read(buf)
+	read, err := conn.Read(buf)
+
+	// stop the goroutine resending everything
+	ticker.Stop()
+	stop <- struct{}{}
+	close(stop)
+
 	if err != nil {
 		return nil, err
 	}
